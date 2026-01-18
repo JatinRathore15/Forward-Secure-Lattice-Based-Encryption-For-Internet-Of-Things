@@ -132,12 +132,18 @@ def G_vector(data, params):
     """
     G : {0,1}* → Z_q^n
     Safe integer conversion (no uint8 overflow)
+    Expands hash output for n > 32 using key derivation
     """
-    digest = hashlib.sha256(data.encode()).digest()
-
-    # Convert bytes → Python ints → mod q
-    vec = [digest[i] for i in range(params.n)]
-    return np.array(vec, dtype=int) % params.q
+    # Use key derivation to get enough bytes for large n
+    vec = []
+    counter = 0
+    while len(vec) < params.n:
+        # Hash data with counter to get more bytes
+        h = hashlib.sha256((data + str(counter)).encode()).digest()
+        vec.extend([h[i] for i in range(min(32, params.n - len(vec)))])
+        counter += 1
+    
+    return np.array(vec[:params.n], dtype=int) % params.q
 
 
 
@@ -200,3 +206,90 @@ def KeyGen(system, user_id):
     sk = SamplePre(A, T_A, u, params)
 
     return sk
+
+
+# --------------------------------------------
+# Main Demo
+# --------------------------------------------
+
+if __name__ == "__main__":
+    import time
+    
+    # Test with paper's recommended parameters
+    test_params = [
+        ("PARA.512", 512, 3329),
+        ("PARA.768", 768, 3329),
+        ("PARA.1024", 1024, 3329)
+    ]
+    
+    print("=" * 70)
+    print("Testing with Research Paper Parameters (Table 1)")
+    print("=" * 70)
+    print()
+    
+    for param_name, n, q in test_params:
+        print(f"\n{'='*70}")
+        print(f"Testing: {param_name} (n={n}, q={q})")
+        print(f"{'='*70}\n")
+        
+        try:
+            start_time = time.time()
+            
+            # Initialize system with paper parameters
+            params = LatticeParams(n=n, q=q, sigma=3.2)
+            system = Setup(tree_depth=4, params=params)
+            
+            setup_time = time.time() - start_time
+            
+            print(f"1. System Setup (took {setup_time:.4f} seconds)")
+            print(f"   Lattice dimension (n): {params.n}")
+            print(f"   Modulus (q): {params.q}")
+            print(f"   Gaussian stddev (sigma): {params.sigma}")
+            print(f"   Gadget width (k): {params.k}")
+            print(f"   Lattice width (m): {params.m}")
+            print(f"   Matrix A shape: {system['A'].shape}")
+            print(f"   Trapdoor T_A shape: {system['T_A'].shape}")
+            print()
+            
+            # Generate keys
+            keygen_start = time.time()
+            user_id = "Alice"
+            sk = KeyGen(system, user_id)
+            keygen_time = time.time() - keygen_start
+            
+            print(f"2. Key Generation (took {keygen_time:.4f} seconds)")
+            print(f"   User ID: {user_id}")
+            print(f"   Secret key shape: {sk.shape}")
+            print(f"   Secret key (first 10 elements): {sk[:10]}")
+            print(f"   Secret key (last 10 elements): {sk[-10:]}")
+            print()
+            
+            # Verify the key property
+            verify_start = time.time()
+            u = G_vector(user_id, params)
+            result = (system["A"] @ sk) % params.q
+            verify_time = time.time() - verify_start
+            
+            print(f"3. Verification (took {verify_time:.4f} seconds)")
+            print(f"   Target vector u shape: {u.shape}")
+            print(f"   Target vector u (first 10): {u[:10]}")
+            print(f"   Computed A @ sk (first 10): {result[:10]}")
+            verification_passed = np.array_equal(result, u)
+            print(f"   Verification: {'PASS' if verification_passed else 'FAIL'}")
+            print()
+            
+            total_time = time.time() - start_time
+            print(f"Total execution time: {total_time:.4f} seconds")
+            
+            if not verification_passed:
+                print("   WARNING: Verification failed!")
+                
+        except MemoryError:
+            print(f"   ERROR: Out of memory for n={n}")
+            print("   This parameter set requires too much memory.")
+        except Exception as e:
+            print(f"   ERROR: {type(e).__name__}: {str(e)}")
+    
+    print("\n" + "=" * 70)
+    print("All parameter tests completed!")
+    print("=" * 70)
