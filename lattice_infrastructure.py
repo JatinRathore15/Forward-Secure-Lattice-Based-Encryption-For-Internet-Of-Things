@@ -145,4 +145,4 @@ if __name__ == "__main__":
     sk = KeyGen(system, "Alice")
     u = G_vector("Alice", params)
     assert np.array_equal((system["A"] @ sk) % params.q, u)
-    print("[P1] PASS")
+    print("[P1] Lattice Infrastructure: PASS", flush=True)

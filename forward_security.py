@@ -90,4 +90,4 @@ if __name__ == "__main__":
     keys = ops.simulate_key_evolution("Alice", [0, 1, 2])
     ct = ops.Encrypt("Alice", 1, 1)
     assert ops.Decrypt(ct, keys) == 1
-    print("[P2] PASS")
+    print("[P2] Forward Security (Encrypt/Decrypt): PASS", flush=True)

@@ -86,4 +86,4 @@ if __name__ == "__main__":
 
     v = QueryValidator(tm, sig, params)
     assert v.validate("Alice", q, pk)
-    print("[P3] PASS")
+    print("[P3] Trust Model (Sign/Verify): PASS", flush=True)
