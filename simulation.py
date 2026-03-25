@@ -5,6 +5,12 @@ Outputs match the Word document and README:
 - Query execution latency, Query throughput, Overall model throughput, Overall model latency
 - False trust acceptance rate (FTAR)
 - Results_Report.csv
+
+Query generation follows the reference paper:
+  - Keyword is encrypted using fs-IBE (lattice-based Dual Regev encryption)
+  - Query object: Q = { EncryptedKeyword, Signature, Epoch_ID }
+  - Query is signed with Dilithium-3 for trust verification
+  - Queries are epoch-bound
 """
 import sys
 import time
@@ -16,13 +22,19 @@ sys.modules["LatticeCrypto"] = lattice_infrastructure
 
 import lattice_infrastructure as P1
 from forward_security import UserOps
-from Trust_Model import TrustManager, DilithiumStub, Query, QueryValidator
+from Trust_Model import TrustManager, DilithiumStub, Query, QueryValidator, match_query_to_data
 
 
 def run_simulation(n=64, num_data=5, num_queries=10, num_malicious=5, tree_depth=3, param_name=None):
     """
     Run full workflow: Setup -> Encrypt data -> Queries (Sign, CheckTrust, Match, Decrypt).
     Returns dict of metrics for output/CSV. If param_name is set, adds parameter info to metrics.
+
+    Query generation follows the reference paper:
+      1. A keyword is encrypted using fs-IBE (Dual Regev lattice encryption)
+      2. The encrypted keyword bytes + epoch are bundled into a Query object
+      3. The query is signed with Dilithium-3 for trust verification
+      4. Queries are epoch-bound and matched against stored encrypted data
     """
     params = P1.LatticeParams(n=n)
     system = P1.Setup(tree_depth=tree_depth, params=params)
@@ -38,6 +50,7 @@ def run_simulation(n=64, num_data=5, num_queries=10, num_malicious=5, tree_depth
     keys = ops.simulate_key_evolution(user_id, nodes)
 
     # ---- Data encryption (IoT stream) ----
+    # IoT devices encrypt their data using fs-IBE for the target user/epoch
     t0 = time.perf_counter()
     encrypted_data = []
     for i in range(num_data):
@@ -46,36 +59,66 @@ def run_simulation(n=64, num_data=5, num_queries=10, num_malicious=5, tree_depth
         encrypted_data.append(ct)
     data_encryption_time = time.perf_counter() - t0
 
+    # ================================================================
+    # QUERY GENERATION (per reference paper)
+    #
+    # Step 1: Encrypt the query keyword using fs-IBE (lattice-based)
+    # Step 2: Construct Query object Q = { EncryptedKeyword, Signature, Epoch_ID }
+    # Step 3: Sign the query using Dilithium-3 for trust verification
+    # Step 4: Queries are epoch-bound
+    # ================================================================
+
+    def generate_signed_query(keyword_bit=1):
+        """
+        Generate a query per the paper's algorithm:
+          1. Encrypt keyword using fs-IBE (Dual Regev)
+          2. Bundle encrypted keyword into Query object with epoch
+          3. Sign with Dilithium-3
+        """
+        # Step 1: Encrypt the query keyword using fs-IBE
+        keyword_ct = ops.Encrypt(user_id, epoch, keyword_bit)
+        # The encrypted keyword is the ciphertext vector c1 (lattice-based)
+        encrypted_keyword_bytes = keyword_ct["c1"].tobytes()
+
+        # Step 2: Construct Query object: Q = { EncryptedKeyword, Signature, Epoch_ID }
+        q = Query(
+            encrypted_keyword=encrypted_keyword_bytes,
+            signature=b"",
+            epoch=epoch
+        )
+
+        # Step 3: Sign the query with Dilithium-3
+        msg = validator.serialize(user_id, q)
+        q.signature = sig.sign(msg, sk_user)
+
+        return q, keyword_ct
+
     # ---- Query encryption time (T_Enc^Q) ----
+    # Measures time to encrypt keyword via fs-IBE + construct + sign query
     t_enc_q_list = []
+    signed_queries = []
     for _ in range(num_queries):
         t0 = time.perf_counter()
-        ops.Encrypt(user_id, epoch, 1)
+        q, keyword_ct = generate_signed_query(keyword_bit=1)
         t_enc_q_list.append(time.perf_counter() - t0)
+        signed_queries.append(q)
     query_encryption_time = sum(t_enc_q_list) / len(t_enc_q_list) if t_enc_q_list else 0
 
     # ---- Trust verification time (T_Trust) ----
-    def one_query():
-        q = Query(b"keyword", b"", epoch)
-        msg = b"P3|" + P1.G_vector(user_id, params).tobytes() + q.encrypted_keyword + q.epoch.to_bytes(8, "big")
-        q.signature = sig.sign(msg, sk_user)
-        return q, msg
-
+    # Validates query signature + checks user trust score
     t_trust_list = []
-    for _ in range(num_queries):
-        q, msg = one_query()
+    for q in signed_queries:
         t0 = time.perf_counter()
         validator.validate(user_id, q, pk_user)
         t_trust_list.append(time.perf_counter() - t0)
     trust_time = sum(t_trust_list) / len(t_trust_list) if t_trust_list else 0
 
-    # ---- Match (simulate: compare epoch/keyword) ----
+    # ---- Match (T_Match): Compare query vs. stored encrypted data ----
+    # Uses match_query_to_data() to find data matching the query's epoch
     t_match_list = []
-    for _ in range(num_queries):
+    for q in signed_queries:
         t0 = time.perf_counter()
-        for ct in encrypted_data:
-            if ct["epoch"] == epoch:
-                break
+        match_query_to_data(q, encrypted_data)
         t_match_list.append(time.perf_counter() - t0)
     match_time = sum(t_match_list) / len(t_match_list) if t_match_list else 0
 
@@ -86,11 +129,13 @@ def run_simulation(n=64, num_data=5, num_queries=10, num_malicious=5, tree_depth
     data_decryption_time = time.perf_counter() - t0
 
     # ---- Decryption time per query (T_Dec) ----
+    # After matching, decrypt the matched data using epoch-bound key
     t_dec_list = []
-    for _ in range(num_queries):
-        ct = encrypted_data[0]
+    for q in signed_queries:
+        matched_indices = match_query_to_data(q, encrypted_data)
         t0 = time.perf_counter()
-        ops.Decrypt(ct, keys)
+        for idx in matched_indices:
+            ops.Decrypt(encrypted_data[idx], keys)
         t_dec_list.append(time.perf_counter() - t0)
     query_decryption_time = sum(t_dec_list) / len(t_dec_list) if t_dec_list else 0
 
@@ -106,11 +151,12 @@ def run_simulation(n=64, num_data=5, num_queries=10, num_malicious=5, tree_depth
     total_ops = num_data + num_queries
     overall_throughput = total_ops / overall_latency if overall_latency > 0 else 0
 
-    # ---- False Trust Acceptance Rate: malicious queries (bad signature) accepted ----
+    # ---- False Trust Acceptance Rate (FTAR) ----
+    # Generate malicious queries with bad signatures; count how many are accepted
     malicious_accepted = 0
     for _ in range(num_malicious):
-        q, msg = one_query()
-        q.signature = b"wrong_signature"
+        q, _ = generate_signed_query(keyword_bit=1)
+        q.signature = b"wrong_signature"  # tamper with signature
         if validator.validate(user_id, q, pk_user):
             malicious_accepted += 1
     ftar = malicious_accepted / num_malicious if num_malicious > 0 else 0
